@@ -25,8 +25,8 @@ struct MenuView: View {
 
     private var sitesAreaHeight: CGFloat {
         let rows = Presets.all.count + settings.customSites.count
-        let rowHeight: CGFloat = 27
-        let fixed: CGFloat = 22 // 标题行
+        let rowHeight: CGFloat = 22.5
+        let fixed: CGFloat = 28 // 标题行
         return CGFloat(min(rows, 10)) * rowHeight + fixed
     }
 

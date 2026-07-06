@@ -47,6 +47,16 @@ final class StatusBarController: NSObject {
         statusItem.button?.image = image
     }
 
+    /// 供截图/调试用(--show-popover 启动参数):直接弹出主面板
+    func showPopover() {
+        if !popover.isShown { togglePopover() }
+    }
+
+    /// 供截图用:主面板所在的窗口
+    var popoverWindow: NSWindow? {
+        popover.contentViewController?.view.window
+    }
+
     // MARK: - 点击分发
 
     @objc private func statusItemClicked() {

@@ -6,7 +6,7 @@ import SwiftUI
 final class SettingsWindowManager {
     static let shared = SettingsWindowManager()
 
-    private var window: NSWindow?
+    private(set) var window: NSWindow?
 
     private init() {}
 

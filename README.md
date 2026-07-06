@@ -8,6 +8,12 @@
 
 SpeedLane 通过你**自己的境外服务器**加速访问 GitHub、Google 等指定网站,而其他所有网站保持直连、完全不经过代理。没有订阅、没有第三方节点、没有全局翻墙 —— 一台能 SSH 登录的 VPS 就够了。
 
+<p align="center">
+  <img src="docs/images/popover.png" width="272" alt="菜单栏主面板:站点开关与一键连接">
+  &nbsp;&nbsp;
+  <img src="docs/images/settings.png" width="466" alt="设置窗口:多服务器管理">
+</p>
+
 ## 特性
 
 - ⚡ **白名单分流**:基于 PAC 自动代理,只有你开启的站点走加速,其余流量一律直连
