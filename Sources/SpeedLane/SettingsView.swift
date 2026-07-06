@@ -9,6 +9,8 @@ struct SettingsView: View {
                 .tabItem { Label("加速站点", systemImage: "globe") }
             GeneralSettingsTab()
                 .tabItem { Label("通用", systemImage: "gearshape") }
+            AboutSettingsTab()
+                .tabItem { Label("关于", systemImage: "info.circle") }
         }
         .padding()
         .frame(width: 600, height: 460)
@@ -329,5 +331,50 @@ struct GeneralSettingsTab: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
         }
+    }
+}
+
+// MARK: - 关于标签页
+
+struct AboutSettingsTab: View {
+    static let repoURL = URL(string: "https://github.com/openzirun/SpeedLane")!
+    static let releasesURL = URL(string: "https://github.com/openzirun/SpeedLane/releases")!
+
+    /// 版本号运行时取自 Info.plist,与打包版本单一来源
+    private var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
+    }
+
+    private var build: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "-"
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 96, height: 96)
+            Text("SpeedLane")
+                .font(.title2)
+                .bold()
+            Text("版本 \(version)(Build \(build))")
+                .foregroundStyle(.secondary)
+            Text("只给选中的网站开一条快车道")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider().frame(width: 260)
+
+            VStack(spacing: 6) {
+                Link("GitHub 项目主页", destination: Self.repoURL)
+                Link("下载最新版本(Releases)", destination: Self.releasesURL)
+            }
+
+            Text("MIT License © 2026 SpeedLane Contributors")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

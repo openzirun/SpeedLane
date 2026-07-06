@@ -46,6 +46,7 @@ public class SettingsForm : Form
         tabs.TabPages.Add(BuildServersTab());
         tabs.TabPages.Add(BuildSitesTab());
         tabs.TabPages.Add(BuildGeneralTab());
+        tabs.TabPages.Add(BuildAboutTab());
         Controls.Add(tabs);
 
         ReloadServerList();
@@ -384,5 +385,85 @@ public class SettingsForm : Form
         _autoConnect.Checked = _settings.AutoConnect;
         _localPort.Text = _settings.LocalPort.ToString();
         _loading = false;
+    }
+
+    // MARK: 关于标签页
+
+    private const string RepoUrl = "https://github.com/openzirun/SpeedLane";
+    private const string ReleasesUrl = RepoUrl + "/releases";
+
+    private TabPage BuildAboutTab()
+    {
+        var page = new TabPage("关于");
+        var layout = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Padding = new Padding(24),
+        };
+
+        var icon = new PictureBox
+        {
+            Image = IconFactory.Bolt(active: true).ToBitmap(),
+            Size = new Size(64, 64),
+            SizeMode = PictureBoxSizeMode.Zoom,
+            Margin = new Padding(0, 0, 0, 8),
+        };
+
+        var title = new Label
+        {
+            Text = "SpeedLane",
+            Font = new Font(Font.FontFamily, 16, FontStyle.Bold),
+            AutoSize = true,
+        };
+
+        // 版本号运行时取自程序集元数据(csproj 的 <Version>),与发布版本单一来源
+        var version = new Label
+        {
+            Text = $"版本 {Application.ProductVersion.Split('+')[0]}",
+            AutoSize = true,
+            ForeColor = Color.Gray,
+        };
+
+        var tagline = new Label
+        {
+            Text = "只给选中的网站开一条快车道",
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Margin = new Padding(3, 0, 3, 12),
+        };
+
+        var repoLink = MakeLink("GitHub 项目主页", RepoUrl);
+        var releasesLink = MakeLink("下载最新版本(Releases)", ReleasesUrl);
+
+        var license = new Label
+        {
+            Text = "MIT License © 2026 SpeedLane Contributors",
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Margin = new Padding(3, 12, 3, 0),
+        };
+
+        layout.Controls.AddRange(new Control[] { icon, title, version, tagline, repoLink, releasesLink, license });
+        page.Controls.Add(layout);
+        return page;
+    }
+
+    private static LinkLabel MakeLink(string text, string url)
+    {
+        var link = new LinkLabel { Text = text, AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
+        link.LinkClicked += (_, _) =>
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(
+                    new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch
+            {
+            }
+        };
+        return link;
     }
 }
