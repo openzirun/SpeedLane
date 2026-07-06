@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  release-macos:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -19,3 +19,24 @@ jobs:
         with:
           files: dist/SpeedLane-*.dmg
           generate_release_notes: true
+
+  release-windows:
+    runs-on: windows-latest
+    needs: release-macos # 串行执行,避免两个任务同时创建同一个 Release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Publish
+        run: >
+          dotnet publish windows/SpeedLane.Win.csproj -c Release -r win-x64
+          --self-contained true -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true -o publish
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path publish/SpeedLane.exe -DestinationPath "SpeedLane-win-x64-$($env:GITHUB_REF_NAME.TrimStart('v')).zip"
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SpeedLane-win-x64-*.zip
