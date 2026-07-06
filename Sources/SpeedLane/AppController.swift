@@ -16,6 +16,8 @@ final class AppController: ObservableObject {
     private var pacServer: PACServer?
     /// 每次内容变化时递增,拼进 PAC URL 让系统强制重新拉取
     private var pacVersion = 0
+    /// 本次连接实际使用的本地 SOCKS 端口(首选端口被占用时自动换用空闲端口)
+    private var activeLocalPort = 1080
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -35,7 +37,11 @@ final class AppController: ObservableObject {
         if usesTunnel {
             switch tunnel.state {
             case .starting: return "正在连接 \(name)…"
-            case .running: return "已连接 \(name),仅所选站点走加速"
+            case .running:
+                if activeLocalPort != settings.localPort {
+                    return "已连接 \(name)(端口 \(settings.localPort) 被占用,改用 \(activeLocalPort))"
+                }
+                return "已连接 \(name),仅所选站点走加速"
             case .stopped, .failed: return "隧道未运行"
             }
         }
@@ -71,7 +77,15 @@ final class AppController: ObservableObject {
         activeServer = server
 
         if server.mode == .sshTunnel {
-            tunnel.start(server: server, localPort: settings.localPort, password: password)
+            // 回收上次异常退出遗留的隧道进程,再找可用端口
+            SSHTunnel.reapOrphan()
+            guard let port = Self.findFreeLocalPort(startingAt: settings.localPort) else {
+                activeServer = nil
+                lastError = "本地端口 \(settings.localPort) 起的 20 个端口都被占用,请在“设置 → 通用”修改本地 SOCKS5 端口"
+                return
+            }
+            activeLocalPort = port
+            tunnel.start(server: server, localPort: port, password: password)
         }
 
         let pacServer = PACServer { [weak self] in
@@ -138,7 +152,7 @@ final class AppController: ObservableObject {
         guard let server = activeServer else { return "DIRECT" }
         switch server.mode {
         case .sshTunnel:
-            return "SOCKS5 127.0.0.1:\(settings.localPort); SOCKS 127.0.0.1:\(settings.localPort)"
+            return "SOCKS5 127.0.0.1:\(activeLocalPort); SOCKS 127.0.0.1:\(activeLocalPort)"
         case .remoteSOCKS5:
             return "SOCKS5 \(server.host):\(server.remotePort); SOCKS \(server.host):\(server.remotePort)"
         case .remoteHTTP:
@@ -146,12 +160,36 @@ final class AppController: ObservableObject {
         }
     }
 
+    /// 从首选端口起找一个空闲的本地端口(bind 探测,最多尝试 20 个)
+    private nonisolated static func findFreeLocalPort(startingAt preferred: Int) -> Int? {
+        for port in preferred..<min(preferred + 20, 65536) where isPortFree(port) {
+            return port
+        }
+        return nil
+    }
+
+    private nonisolated static func isPortFree(_ port: Int) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(port).bigEndian)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
+    }
+
     /// 给 git 用的代理 URL(socks5h = 域名也在代理端解析)
     private var gitProxyURL: String {
         guard let server = activeServer else { return "" }
         switch server.mode {
         case .sshTunnel:
-            return "socks5h://127.0.0.1:\(settings.localPort)"
+            return "socks5h://127.0.0.1:\(activeLocalPort)"
         case .remoteSOCKS5:
             return "socks5h://\(server.host):\(server.remotePort)"
         case .remoteHTTP:

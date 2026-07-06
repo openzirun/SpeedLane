@@ -75,6 +75,46 @@ public class SshTunnel
         return psi;
     }
 
+    private static string PidFilePath => Path.Combine(AppSettings.Directory, "tunnel.pid");
+
+    /// <summary>清理上次 App 异常退出遗留的 ssh 隧道进程(校验进程名,不误杀其他程序)</summary>
+    public static void ReapOrphan()
+    {
+        try
+        {
+            if (!File.Exists(PidFilePath)) return;
+            if (int.TryParse(File.ReadAllText(PidFilePath).Trim(), out var pid))
+            {
+                try
+                {
+                    var process = Process.GetProcessById(pid);
+                    if (process.ProcessName.Equals("ssh", StringComparison.OrdinalIgnoreCase))
+                        process.Kill();
+                }
+                catch
+                {
+                    // 进程已不存在
+                }
+            }
+            File.Delete(PidFilePath);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void WritePidFile(int pid)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppSettings.Directory);
+            File.WriteAllText(PidFilePath, pid.ToString());
+        }
+        catch
+        {
+        }
+    }
+
     public void Start(ServerConfig server, int localPort, string? password)
     {
         Stop();
@@ -107,6 +147,7 @@ public class SshTunnel
             process.Start();
             process.BeginErrorReadLine();
             _process = process;
+            WritePidFile(process.Id);
         }
         catch (Exception ex)
         {
@@ -125,6 +166,7 @@ public class SshTunnel
         {
         }
         _process = null;
+        try { File.Delete(PidFilePath); } catch { }
     }
 
     /// <summary>在服务器上执行 echo ok 验证连通性;返回 null 表示成功,否则为错误信息</summary>

@@ -70,6 +70,35 @@ final class SSHTunnel: ObservableObject {
         return process
     }
 
+    // MARK: - 孤儿进程清理
+
+    /// 隧道进程 PID 记录文件:App 被强杀时 ssh 子进程会存活并继续占用端口,
+    /// 下次连接前根据此文件回收
+    private nonisolated static var pidFileURL: URL {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SpeedLane", isDirectory: true)
+            .appendingPathComponent("tunnel.pid")
+    }
+
+    /// 清理上次 App 异常退出遗留的 ssh 隧道进程(严格校验命令行,不误杀其他程序)
+    nonisolated static func reapOrphan() {
+        guard let text = try? String(contentsOf: pidFileURL, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return }
+        let (status, command) = runCommand("/bin/ps", ["-p", "\(pid)", "-o", "command="])
+        if status == 0, command.contains("/usr/bin/ssh"), command.contains("-D 127.0.0.1:") {
+            kill(pid, SIGTERM)
+        }
+        try? FileManager.default.removeItem(at: pidFileURL)
+    }
+
+    private nonisolated static func writePidFile(_ pid: Int32) {
+        let url = pidFileURL
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? "\(pid)".write(to: url, atomically: true, encoding: .utf8)
+    }
+
     // MARK: - 隧道
 
     func start(server: ServerConfig, localPort: Int, password: String?) {
@@ -114,6 +143,7 @@ final class SSHTunnel: ObservableObject {
         }
 
         self.process = process
+        Self.writePidFile(process.processIdentifier)
 
         // ssh -N 成功后不会有任何输出:2 秒后进程仍存活即视为已连接
         confirmTask = Task { [weak self] in
@@ -133,6 +163,7 @@ final class SSHTunnel: ObservableObject {
             process.terminate()
         }
         process = nil
+        try? FileManager.default.removeItem(at: Self.pidFileURL)
         state = .stopped
     }
 

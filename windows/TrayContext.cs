@@ -15,6 +15,7 @@ public class TrayContext : ApplicationContext
     private bool _enabled;
     private ServerConfig? _activeServer;
     private int _pacVersion;
+    private int _activeLocalPort = 1080; // 首选端口被占用时自动换用空闲端口
     private SettingsForm? _settingsForm;
 
     public TrayContext()
@@ -200,7 +201,21 @@ public class TrayContext : ApplicationContext
         _activeServer = server;
 
         if (server.Mode == ProxyMode.SshTunnel)
-            _tunnel.Start(server, _settings.LocalPort, password);
+        {
+            // 回收上次异常退出遗留的隧道进程,再找可用端口
+            SshTunnel.ReapOrphan();
+            var port = FindFreeLocalPort(_settings.LocalPort);
+            if (port == null)
+            {
+                _activeServer = null;
+                _tray.ShowBalloonTip(4000, "SpeedLane",
+                    $"本地端口 {_settings.LocalPort} 起的 20 个端口都被占用,请在设置中修改本地 SOCKS5 端口",
+                    ToolTipIcon.Error);
+                return;
+            }
+            _activeLocalPort = port.Value;
+            _tunnel.Start(server, _activeLocalPort, password);
+        }
 
         try
         {
@@ -272,7 +287,7 @@ public class TrayContext : ApplicationContext
         return server.Mode switch
         {
             ProxyMode.SshTunnel =>
-                $"SOCKS5 127.0.0.1:{_settings.LocalPort}; SOCKS 127.0.0.1:{_settings.LocalPort}",
+                $"SOCKS5 127.0.0.1:{_activeLocalPort}; SOCKS 127.0.0.1:{_activeLocalPort}",
             ProxyMode.RemoteSocks5 =>
                 $"SOCKS5 {server.Host}:{server.RemotePort}; SOCKS {server.Host}:{server.RemotePort}",
             _ => $"PROXY {server.Host}:{server.RemotePort}",
@@ -285,10 +300,30 @@ public class TrayContext : ApplicationContext
         if (server == null) return "";
         return server.Mode switch
         {
-            ProxyMode.SshTunnel => $"socks5h://127.0.0.1:{_settings.LocalPort}",
+            ProxyMode.SshTunnel => $"socks5h://127.0.0.1:{_activeLocalPort}",
             ProxyMode.RemoteSocks5 => $"socks5h://{server.Host}:{server.RemotePort}",
             _ => $"http://{server.Host}:{server.RemotePort}",
         };
+    }
+
+    /// <summary>从首选端口起找一个空闲的本地端口(bind 探测,最多尝试 20 个)</summary>
+    private static int? FindFreeLocalPort(int preferred)
+    {
+        for (var port = preferred; port < Math.Min(preferred + 20, 65536); port++)
+        {
+            try
+            {
+                var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+                listener.Start();
+                listener.Stop();
+                return port;
+            }
+            catch
+            {
+                // 被占用,试下一个
+            }
+        }
+        return null;
     }
 
     // MARK: 窗口与退出
