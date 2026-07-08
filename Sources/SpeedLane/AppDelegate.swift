@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusBar = StatusBarController(controller: controller, settings: settings)
 
         if settings.autoConnect {
-            controller.enable()
+            controller.toggle(true)
         }
 
         // 截图/调试辅助:--show-popover 弹出主面板,--show-settings 打开设置窗口,
@@ -98,8 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // 退出时务必还原系统代理,避免断网
-        if let controller, controller.isEnabled {
-            controller.disable()
+        if let controller, controller.isEnabled || controller.isBusy {
+            controller.teardownSync()
         }
     }
 }

@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>SpeedLane</RootNamespace>
     <AssemblyName>SpeedLane</AssemblyName>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
     <ApplicationIcon>AppIcon.ico</ApplicationIcon>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!-- 允许在 macOS/Linux 上交叉编译校验 -->

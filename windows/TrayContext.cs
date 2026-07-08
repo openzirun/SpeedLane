@@ -12,11 +12,20 @@ public class TrayContext : ApplicationContext
     private readonly SshTunnel _tunnel = new();
     private readonly Control _invoker = new(); // 用于把后台事件切回 UI 线程
 
-    private bool _enabled;
+    private enum Phase { Disconnected, Connecting, Connected, Disconnecting }
+
+    private Phase _phase = Phase.Disconnected;
     private ServerConfig? _activeServer;
     private int _pacVersion;
     private int _activeLocalPort = 1080; // 首选端口被占用时自动换用空闲端口
     private SettingsForm? _settingsForm;
+
+    private readonly System.Windows.Forms.Timer _pulseTimer;
+    private int _pulseFrame;
+    private Icon? _currentIcon;
+
+    private bool Enabled => _phase == Phase.Connected;
+    private bool Busy => _phase is Phase.Connecting or Phase.Disconnecting;
 
     public TrayContext()
     {
@@ -27,7 +36,7 @@ public class TrayContext : ApplicationContext
 
         _tunnel.Failed += message => _invoker.BeginInvoke(() =>
         {
-            if (!_enabled) return;
+            if (!Enabled) return;
             Disable();
             _tray.ShowBalloonTip(5000, "SpeedLane 连接失败", message, ToolTipIcon.Error);
         });
@@ -39,6 +48,16 @@ public class TrayContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = new ContextMenuStrip(),
         };
+        _currentIcon = _tray.Icon;
+
+        // “连接中/断开中”时驱动托盘图标呼吸脉冲,作为进度动画
+        _pulseTimer = new System.Windows.Forms.Timer { Interval = 350 };
+        _pulseTimer.Tick += (_, _) =>
+        {
+            _pulseFrame++;
+            SetIcon(IconFactory.BoltConnecting(_pulseFrame));
+        };
+
         _tray.ContextMenuStrip.Opening += (_, _) => RebuildMenu();
         _tray.MouseUp += (_, e) =>
         {
@@ -122,7 +141,14 @@ public class TrayContext : ApplicationContext
         menu.Items.Add(sitesMenu);
         menu.Items.Add(new ToolStripSeparator());
 
-        var connect = new ToolStripMenuItem(_enabled ? "断开连接" : "连接选中站点");
+        var connectText = _phase switch
+        {
+            Phase.Connecting => "连接中…",
+            Phase.Disconnecting => "断开中…",
+            Phase.Connected => "断开连接",
+            _ => "连接选中站点",
+        };
+        var connect = new ToolStripMenuItem(connectText) { Enabled = !Busy };
         connect.Font = new Font(connect.Font, FontStyle.Bold);
         connect.Click += (_, _) => Toggle();
         menu.Items.Add(connect);
@@ -149,29 +175,72 @@ public class TrayContext : ApplicationContext
             .Invoke(_tray, null);
     }
 
-    private string StatusText()
+    private string StatusText() => _phase switch
     {
-        if (!_enabled) return "未启用,所有流量直连";
-        var name = _activeServer?.Name ?? "";
-        return $"已连接 {name},仅所选站点走加速";
+        Phase.Connecting => "正在连接…",
+        Phase.Disconnecting => "正在断开…",
+        Phase.Connected => $"已连接 {_activeServer?.Name},仅所选站点走加速",
+        _ => "未启用,所有流量直连",
+    };
+
+    /// <summary>切换连接状态并刷新界面;连接/断开过程中启动图标脉冲动画</summary>
+    private void SetPhase(Phase phase)
+    {
+        _phase = phase;
+        if (phase is Phase.Connecting or Phase.Disconnecting)
+        {
+            _pulseFrame = 0;
+            if (!_pulseTimer.Enabled) _pulseTimer.Start();
+        }
+        else
+        {
+            _pulseTimer.Stop();
+        }
+        UpdateUi();
     }
 
     private void UpdateUi()
     {
-        _tray.Icon = IconFactory.Bolt(_enabled);
-        _tray.Text = $"SpeedLane - {(_enabled ? $"已连接 {_activeServer?.Name}" : "未启用")}";
+        switch (_phase)
+        {
+            case Phase.Connecting:
+                _tray.Text = "SpeedLane - 正在连接…"; // 图标由脉冲动画负责
+                break;
+            case Phase.Disconnecting:
+                _tray.Text = "SpeedLane - 正在断开…";
+                break;
+            case Phase.Connected:
+                SetIcon(IconFactory.Bolt(active: true));
+                _tray.Text = $"SpeedLane - 已连接 {_activeServer?.Name}";
+                break;
+            default:
+                SetIcon(IconFactory.Bolt(active: false));
+                _tray.Text = "SpeedLane - 未启用";
+                break;
+        }
+    }
+
+    /// <summary>更换托盘图标并释放上一枚,避免脉冲动画期间 GDI 句柄泄漏</summary>
+    private void SetIcon(Icon icon)
+    {
+        _tray.Icon = icon;
+        _currentIcon?.Dispose();
+        _currentIcon = icon;
     }
 
     // MARK: 开关
 
     public void Toggle()
     {
-        if (_enabled) Disable();
+        if (Busy) return; // 连接/断开进行中,忽略重复点击
+        if (Enabled) Disable();
         else Enable();
     }
 
     public void Enable()
     {
+        if (_phase != Phase.Disconnected) return;
+
         if (_settings.ActiveDomains.Count == 0)
         {
             _tray.ShowBalloonTip(4000, "SpeedLane", "请先勾选至少一个要加速的站点", ToolTipIcon.Warning);
@@ -198,84 +267,138 @@ public class TrayContext : ApplicationContext
             }
         }
 
+        // 立刻进入“连接中”,托盘图标开始脉冲动画;阻塞操作全部放后台线程,UI 不卡顿
         _activeServer = server;
+        SetPhase(Phase.Connecting);
 
-        if (server.Mode == ProxyMode.SshTunnel)
+        var preferredPort = _settings.LocalPort;
+        Task.Run(() =>
         {
-            // 回收上次异常退出遗留的隧道进程,再找可用端口
-            SshTunnel.ReapOrphan();
-            var port = FindFreeLocalPort(_settings.LocalPort);
-            if (port == null)
+            if (server.Mode == ProxyMode.SshTunnel)
             {
-                _activeServer = null;
-                _tray.ShowBalloonTip(4000, "SpeedLane",
-                    $"本地端口 {_settings.LocalPort} 起的 20 个端口都被占用,请在设置中修改本地 SOCKS5 端口",
-                    ToolTipIcon.Error);
+                // 回收上次异常退出遗留的隧道进程,再找可用端口
+                SshTunnel.ReapOrphan();
+                var port = FindFreeLocalPort(preferredPort);
+                if (port == null)
+                {
+                    Fail($"本地端口 {preferredPort} 起的 20 个端口都被占用,请在设置中修改本地 SOCKS5 端口");
+                    return;
+                }
+                _activeLocalPort = port.Value;
+                _tunnel.Start(server, _activeLocalPort, password);
+            }
+
+            try
+            {
+                _pacServer.Start();
+            }
+            catch (Exception ex)
+            {
+                _tunnel.Stop();
+                Fail($"本地 PAC 服务启动失败:{ex.Message}");
                 return;
             }
-            _activeLocalPort = port.Value;
-            _tunnel.Start(server, _activeLocalPort, password);
-        }
 
-        try
+            _pacVersion++;
+            try
+            {
+                SystemProxy.EnablePac($"{_pacServer.BaseUrl}?v={_pacVersion}");
+            }
+            catch (Exception ex)
+            {
+                _pacServer.Stop();
+                _tunnel.Stop();
+                Fail($"设置系统代理失败:{ex.Message}");
+                return;
+            }
+
+            // git 命令行加速始终开启,仅对所选域名生效
+            GitProxy.Apply(_settings, GitProxyUrl());
+
+            _invoker.BeginInvoke(() => SetPhase(Phase.Connected));
+        });
+    }
+
+    /// <summary>连接过程中出错:回到 UI 线程还原状态并提示</summary>
+    private void Fail(string message)
+    {
+        _invoker.BeginInvoke(() =>
         {
-            _pacServer.Start();
-        }
-        catch (Exception ex)
-        {
-            _tunnel.Stop();
             _activeServer = null;
-            _tray.ShowBalloonTip(4000, "SpeedLane", $"本地 PAC 服务启动失败:{ex.Message}", ToolTipIcon.Error);
-            return;
-        }
-
-        _pacVersion++;
-        try
-        {
-            SystemProxy.EnablePac($"{_pacServer.BaseUrl}?v={_pacVersion}");
-        }
-        catch (Exception ex)
-        {
-            _pacServer.Stop();
-            _tunnel.Stop();
-            _activeServer = null;
-            _tray.ShowBalloonTip(4000, "SpeedLane", $"设置系统代理失败:{ex.Message}", ToolTipIcon.Error);
-            return;
-        }
-
-        // git 命令行加速始终开启,仅对所选域名生效
-        GitProxy.Apply(_settings, GitProxyUrl());
-
-        _enabled = true;
-        UpdateUi();
+            SetPhase(Phase.Disconnected);
+            _tray.ShowBalloonTip(4000, "SpeedLane", message, ToolTipIcon.Error);
+        });
     }
 
     public void Disable()
     {
+        if (_phase != Phase.Connected && _phase != Phase.Connecting) return;
+        SetPhase(Phase.Disconnecting);
+        Task.Run(() =>
+        {
+            SystemProxy.DisablePac();
+            _pacServer.Stop();
+            _tunnel.Stop();
+            GitProxy.Clear(_settings);
+            _invoker.BeginInvoke(() =>
+            {
+                _activeServer = null;
+                SetPhase(Phase.Disconnected);
+            });
+        });
+    }
+
+    /// <summary>退出时的同步拆除:必须在进程结束前还原系统代理,避免断网</summary>
+    private void TeardownSync()
+    {
+        _pulseTimer.Stop();
         SystemProxy.DisablePac();
         _pacServer.Stop();
         _tunnel.Stop();
         GitProxy.Clear(_settings);
         _activeServer = null;
-        _enabled = false;
-        UpdateUi();
+        _phase = Phase.Disconnected;
     }
 
-    /// <summary>站点勾选变化:已启用时刷新 PAC 与 git 配置</summary>
+    /// <summary>站点勾选变化:已启用时刷新 PAC 与 git 配置(阻塞命令放后台,勾选不卡顿)</summary>
     public void SettingsChanged()
     {
-        if (!_enabled) return;
+        if (!Enabled) return;
         _pacVersion++;
-        SystemProxy.EnablePac($"{_pacServer.BaseUrl}?v={_pacVersion}");
-        GitProxy.Apply(_settings, GitProxyUrl());
+        var url = $"{_pacServer.BaseUrl}?v={_pacVersion}";
+        var gitUrl = GitProxyUrl();
+        Task.Run(() =>
+        {
+            try
+            {
+                SystemProxy.EnablePac(url);
+                GitProxy.Apply(_settings, gitUrl);
+            }
+            catch
+            {
+            }
+        });
     }
 
     /// <summary>服务器信息或默认服务器变化:已启用时重建整个链路</summary>
     public void ConnectionSettingsChanged()
     {
-        if (!_enabled) return;
-        Disable();
-        Enable();
+        if (_phase != Phase.Connected) return;
+        // 先异步断开,完成后立即重连
+        SetPhase(Phase.Disconnecting);
+        Task.Run(() =>
+        {
+            SystemProxy.DisablePac();
+            _pacServer.Stop();
+            _tunnel.Stop();
+            GitProxy.Clear(_settings);
+            _invoker.BeginInvoke(() =>
+            {
+                _activeServer = null;
+                SetPhase(Phase.Disconnected);
+                Enable();
+            });
+        });
     }
 
     // MARK: 代理地址
@@ -341,7 +464,7 @@ public class TrayContext : ApplicationContext
 
     private void ExitApp()
     {
-        if (_enabled) Disable(); // 退出时务必还原系统代理,避免断网
+        if (Enabled || Busy) TeardownSync(); // 退出时务必还原系统代理,避免断网
         _tray.Visible = false;
         _tray.Dispose();
         ExitThread();
@@ -351,16 +474,29 @@ public class TrayContext : ApplicationContext
 /// <summary>运行时绘制托盘/窗口图标(蓝色圆角矩形 + 白色闪电)</summary>
 public static class IconFactory
 {
-    public static Icon Bolt(bool active)
+    public static Icon Bolt(bool active) =>
+        Draw(active ? Color.FromArgb(0, 105, 255) : Color.FromArgb(120, 120, 128));
+
+    /// <summary>“连接中”脉冲动画的一帧:蓝色在暗↔亮之间呼吸</summary>
+    public static Icon BoltConnecting(int frame)
+    {
+        const int steps = 6;
+        // 三角波 0→1→0,形成呼吸效果
+        double t = 1.0 - Math.Abs((frame % steps) - (steps - 1) / 2.0) / ((steps - 1) / 2.0);
+        int g = (int)(70 + t * 90);   // 70..160
+        int b = (int)(150 + t * 105); // 150..255
+        return Draw(Color.FromArgb(0, g, Math.Min(255, b)));
+    }
+
+    private static Icon Draw(Color background)
     {
         using var bmp = new Bitmap(32, 32);
         using (var g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using var background = new SolidBrush(
-                active ? Color.FromArgb(0, 105, 255) : Color.FromArgb(120, 120, 128));
+            using var brush = new SolidBrush(background);
             using var path = RoundedRect(new Rectangle(1, 1, 30, 30), 8);
-            g.FillPath(background, path);
+            g.FillPath(brush, path);
 
             var bolt = new[]
             {

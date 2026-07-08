@@ -33,10 +33,10 @@ final class StatusBarController: NSObject {
         }
         updateIcon(enabled: controller.isEnabled)
 
-        cancellable = controller.$isEnabled
+        cancellable = controller.$phase
             .receive(on: RunLoop.main)
-            .sink { [weak self] enabled in
-                self?.updateIcon(enabled: enabled)
+            .sink { [weak self] phase in
+                self?.updateIcon(enabled: phase == .connected)
             }
     }
 
@@ -133,7 +133,7 @@ final class StatusBarController: NSObject {
     }
 
     @objc private func quit() {
-        controller.disable()
+        controller.teardownSync()
         NSApp.terminate(nil)
     }
 }

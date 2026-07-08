@@ -54,15 +54,35 @@ struct MenuView: View {
         Button {
             controller.toggle(!controller.isEnabled)
         } label: {
-            Label(
-                controller.isEnabled ? "断开" : "连接选中站点",
-                systemImage: controller.isEnabled ? "bolt.slash.fill" : "bolt.fill"
-            )
+            HStack(spacing: 6) {
+                switch controller.phase {
+                case .connecting, .disconnecting:
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                    Text(controller.phase == .connecting ? "连接中…" : "断开中…")
+                case .connected:
+                    Image(systemName: "bolt.slash.fill")
+                    Text("断开")
+                case .disconnected:
+                    Image(systemName: "bolt.fill")
+                    Text("连接选中站点")
+                }
+            }
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
-        .tint(controller.isEnabled ? .red : .accentColor)
+        .tint(connectButtonTint)
         .controlSize(.large)
+        .disabled(controller.isBusy)
+        .animation(.easeInOut(duration: 0.2), value: controller.phase)
+    }
+
+    private var connectButtonTint: Color {
+        switch controller.phase {
+        case .connected, .disconnecting: return .red
+        case .connecting, .disconnected: return .accentColor
+        }
     }
 
     private var statusColor: Color {
@@ -118,7 +138,7 @@ struct MenuView: View {
             }
             Spacer()
             Button("退出") {
-                controller.disable()
+                controller.teardownSync()
                 NSApp.terminate(nil)
             }
         }
