@@ -1,5 +1,24 @@
 import SwiftUI
 
+/// 弹窗里的实时速率行(单独观察 monitor,每秒刷新不影响其他部分)
+private struct TrafficRateLine: View {
+    @ObservedObject var monitor: TrafficMonitor
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // 定宽格式,速率变化时两项不会互相推挤
+            Label("\(TrafficMonitor.compactFixed(monitor.downloadRate))/s", systemImage: "arrow.down")
+            Label("\(TrafficMonitor.compactFixed(monitor.uploadRate))/s", systemImage: "arrow.up")
+            Spacer()
+            Text("累计 \(TrafficMonitor.readable(monitor.totalReceived + monitor.totalSent))")
+                .foregroundStyle(.tertiary)
+        }
+        .font(.system(.caption, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .padding(.top, 1)
+    }
+}
+
 struct MenuView: View {
     @EnvironmentObject var controller: AppController
     @EnvironmentObject var settings: AppSettings
@@ -13,7 +32,7 @@ struct MenuView: View {
             ScrollView {
                 SitesConfigView(allowsEditing: false)
             }
-            // 最多显示约 10 行站点,超出在内部滚动
+            // 站点区域有上限高度,超出在内部滚动
             .frame(height: sitesAreaHeight)
             connectButton
             Divider()
@@ -25,9 +44,12 @@ struct MenuView: View {
 
     private var sitesAreaHeight: CGFloat {
         let rows = Presets.all.count + settings.customSites.count
+        let groups = Presets.groups.count + (settings.customSites.isEmpty ? 0 : 1)
         let rowHeight: CGFloat = 22.5
+        let groupHeight: CGFloat = 26
         let fixed: CGFloat = 28 // 标题行
-        return CGFloat(min(rows, 10)) * rowHeight + fixed
+        let total = CGFloat(rows) * rowHeight + CGFloat(groups) * groupHeight + fixed
+        return min(total, 360)
     }
 
     // MARK: - 顶部标题与状态
@@ -44,6 +66,10 @@ struct MenuView: View {
                     .font(.caption)
                     .foregroundStyle(controller.lastError == nil ? .secondary : Color.red)
                     .lineLimit(3)
+            }
+
+            if controller.isEnabled, controller.hasTrafficStats {
+                TrafficRateLine(monitor: controller.monitor)
             }
         }
     }
@@ -85,17 +111,14 @@ struct MenuView: View {
         }
     }
 
+    /// 状态点同样只看 phase,和文案、按钮保持一致
     private var statusColor: Color {
         if controller.lastError != nil { return .red }
-        guard controller.isEnabled else { return .gray }
-        if controller.usesTunnel {
-            switch controller.tunnel.state {
-            case .running: return .green
-            case .starting: return .yellow
-            case .stopped, .failed: return .red
-            }
+        switch controller.phase {
+        case .disconnected: return .gray
+        case .connecting, .disconnecting: return .yellow
+        case .connected: return .green
         }
-        return .green
     }
 
     // MARK: - 服务器选择
@@ -138,7 +161,6 @@ struct MenuView: View {
             }
             Spacer()
             Button("退出") {
-                controller.teardownSync()
                 NSApp.terminate(nil)
             }
         }

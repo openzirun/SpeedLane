@@ -155,6 +155,18 @@ public class SshTunnel
         }
     }
 
+    /// <summary>启动后确认:ssh -N 连上后没有任何输出,等待一段时间进程仍存活即视为连接成功。
+    /// 返回 null 表示成功,否则为错误信息(进程已退出,通常是认证失败或网络不通)</summary>
+    public string? WaitForStartup(int timeoutMs = 2000)
+    {
+        var process = _process;
+        if (process == null) return "ssh 进程未能启动";
+        if (!process.WaitForExit(timeoutMs)) return null;
+        string message;
+        lock (_stderr) message = _stderr.ToString().Trim();
+        return message.Length == 0 ? $"SSH 连接失败(退出码 {process.ExitCode})" : message;
+    }
+
     public void Stop()
     {
         _stopping = true;

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// 管理 `ssh -N -D` 动态端口转发进程,在本地提供 SOCKS5 代理
@@ -152,6 +153,15 @@ final class SSHTunnel: ObservableObject {
             if self.process?.isRunning == true, self.state == .starting {
                 self.state = .running
             }
+        }
+    }
+
+    /// 等待隧道离开"启动中"(确认存活、启动失败或被停止都会返回)
+    /// 连接流程用它判定隧道是否真的起来了,避免按钮已显示"断开"而状态还停在"正在连接"
+    func waitUntilSettled() async {
+        guard state == .starting else { return }
+        for await current in $state.values where current != .starting {
+            return
         }
     }
 

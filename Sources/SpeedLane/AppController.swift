@@ -6,6 +6,8 @@ import SwiftUI
 final class AppController: ObservableObject {
     let settings: AppSettings
     let tunnel = SSHTunnel()
+    /// 流量统计与连接日志(数据来自本地 SOCKS5 中继)
+    let monitor = TrafficMonitor()
 
     enum Phase: Equatable {
         case disconnected
@@ -30,7 +32,16 @@ final class AppController: ObservableObject {
     /// 每次内容变化时递增,拼进 PAC URL 让系统强制重新拉取
     private var pacVersion = 0
     /// 本次连接实际使用的本地 SOCKS 端口(首选端口被占用时自动换用空闲端口)
+    /// 走中继时这是中继的监听端口,PAC 与 git 都指向它
     private var activeLocalPort = 1080
+    /// ssh -D 实际监听的端口(中继的上游),与 activeLocalPort 错开
+    private var tunnelPort = 1081
+    /// 本地 SOCKS5 中继,负责统计流量与记录连接日志
+    private var relay: SOCKS5Relay?
+    /// 是否动过系统代理设置:没动过就不必在退出时跑一遍 networksetup
+    private var didEnableSystemProxy = false
+    /// 退出清理只做一次(退出按钮和 applicationWillTerminate 都会调到)
+    private var didTeardown = false
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -45,22 +56,26 @@ final class AppController: ObservableObject {
 
     var usesTunnel: Bool { activeServer?.mode == .sshTunnel }
 
+    /// 当前连接是否有流量统计(HTTP 代理模式不经中继,拿不到数据)
+    var hasTrafficStats: Bool { activeServer?.mode.usesRelay ?? false }
+
+    /// 状态文案只由 phase 决定,保证和按钮显示的状态始终一致
     var statusText: String {
         if let lastError { return lastError }
-        if !isEnabled { return "未启用,所有流量直连" }
         let name = activeServer?.name ?? ""
-        if usesTunnel {
-            switch tunnel.state {
-            case .starting: return "正在连接 \(name)…"
-            case .running:
-                if activeLocalPort != settings.localPort {
-                    return "已连接 \(name)(端口 \(settings.localPort) 被占用,改用 \(activeLocalPort))"
-                }
-                return "已连接 \(name),仅所选站点走加速"
-            case .stopped, .failed: return "隧道未运行"
+        switch phase {
+        case .disconnected:
+            return "未启用,所有流量直连"
+        case .connecting:
+            return name.isEmpty ? "正在连接…" : "正在连接 \(name)…"
+        case .disconnecting:
+            return "正在断开…"
+        case .connected:
+            if usesTunnel, activeLocalPort != settings.localPort {
+                return "已连接 \(name)(端口 \(settings.localPort) 被占用,改用 \(activeLocalPort))"
             }
+            return "已连接 \(name),仅所选站点走加速"
         }
-        return "已启用 \(name),仅所选站点走加速"
     }
 
     // MARK: - 开关
@@ -96,11 +111,9 @@ final class AppController: ObservableObject {
         phase = .connecting
         activeServer = server
 
-        if server.mode == .sshTunnel {
-            // 回收上次异常退出遗留的隧道进程、探测可用端口,都是阻塞操作,放后台线程
-            let preferredPort = settings.localPort
-            await runOffMain { SSHTunnel.reapOrphan() }
-            guard phase == .connecting else { return }
+        // 中继监听用户配置的端口,PAC 与 git 都指向它;隧道另起一个端口作为中继的上游
+        let preferredPort = settings.localPort
+        if server.mode.usesRelay {
             guard let port = await runOffMain({ Self.findFreeLocalPort(startingAt: preferredPort) }) else {
                 activeServer = nil
                 phase = .disconnected
@@ -109,7 +122,54 @@ final class AppController: ObservableObject {
             }
             guard phase == .connecting else { return }
             activeLocalPort = port
+        }
+
+        if server.mode == .sshTunnel {
+            // 回收上次异常退出遗留的隧道进程、探测可用端口,都是阻塞操作,放后台线程
+            await runOffMain { SSHTunnel.reapOrphan() }
+            guard phase == .connecting else { return }
+            let searchFrom = activeLocalPort + 1
+            guard let port = await runOffMain({ Self.findFreeLocalPort(startingAt: searchFrom) }) else {
+                activeServer = nil
+                phase = .disconnected
+                lastError = "本地端口 \(searchFrom) 起的 20 个端口都被占用,请在“设置 → 通用”修改本地 SOCKS5 端口"
+                return
+            }
+            guard phase == .connecting else { return }
+            tunnelPort = port
             tunnel.start(server: server, localPort: port, password: password)
+
+            // ssh -N 连上后没有任何输出,需要等进程存活确认才算真正连上;
+            // 确认之前不碰系统代理,免得隧道没起来却把流量指过去
+            await tunnel.waitUntilSettled()
+            guard phase == .connecting else { return }
+            if case .failed(let message) = tunnel.state {
+                tunnel.stop()
+                activeServer = nil
+                phase = .disconnected
+                lastError = "连接失败:\(message)"
+                return
+            }
+        }
+
+        // 中继夹在浏览器和上游代理之间,流量统计和连接日志都来自这里
+        if server.mode.usesRelay {
+            let relay = SOCKS5Relay(
+                listenPort: UInt16(activeLocalPort),
+                upstreamHost: server.mode == .sshTunnel ? "127.0.0.1" : server.host,
+                upstreamPort: UInt16(server.mode == .sshTunnel ? tunnelPort : server.remotePort),
+                monitor: monitor
+            )
+            do {
+                try relay.start()
+            } catch {
+                tunnel.stop()
+                activeServer = nil
+                phase = .disconnected
+                lastError = "本地中继启动失败:\(error.localizedDescription)"
+                return
+            }
+            self.relay = relay
         }
 
         let pacServer = PACServer { [weak self] in
@@ -119,6 +179,7 @@ final class AppController: ObservableObject {
         do {
             try pacServer.start()
         } catch {
+            stopRelay()
             tunnel.stop()
             activeServer = nil
             phase = .disconnected
@@ -129,11 +190,17 @@ final class AppController: ObservableObject {
 
         pacVersion += 1
         let pacURL = "\(pacServer.baseURL)?v=\(pacVersion)"
+        // 只要调用过就要负责还原:可能部分服务已设置成功
+        didEnableSystemProxy = true
         // networksetup 会对每个网络服务连续调用多次、耗时较久,放后台执行
         if let error = await runOffMain({ SystemProxy.enablePAC(url: pacURL) }) {
             pacServer.stop()
             self.pacServer = nil
+            stopRelay()
             tunnel.stop()
+            // 回滚已经设置成功的那部分,否则系统代理会指向已关闭的中继
+            await runOffMain { SystemProxy.disablePAC() }
+            didEnableSystemProxy = false
             activeServer = nil
             phase = .disconnected
             lastError = "设置系统代理失败:\(error)"
@@ -146,32 +213,79 @@ final class AppController: ObservableObject {
         let gitURL = gitProxyURL
         await runOffMain { GitProxy.apply(domains: domains, proxyURL: gitURL) }
 
+        if server.mode.usesRelay {
+            monitor.resetTotals()
+            monitor.startSampling()
+        }
         phase = .connected
+    }
+
+    private func stopRelay() {
+        relay?.stop()
+        relay = nil
     }
 
     func disable() async {
         guard phase == .connected || phase == .connecting else { return }
         phase = .disconnecting
+        monitor.stopSampling()
+        stopRelay()
         tunnel.stop()
         let pac = pacServer
         pacServer = nil
         pac?.stop()
         // 还原系统代理与 git 配置,阻塞命令放后台,主线程保持流畅
+        let shouldRestoreProxy = didEnableSystemProxy
         await runOffMain {
-            SystemProxy.disablePAC()
+            if shouldRestoreProxy { SystemProxy.disablePAC() }
             GitProxy.clear()
         }
+        didEnableSystemProxy = false
         activeServer = nil
         phase = .disconnected
     }
 
-    /// 退出时的同步拆除:必须在进程结束前还原系统代理,不能走异步
+    /// 退出流程:本地服务立刻停掉(毫秒级),耗时的系统设置还原放后台,完成后回调
+    ///
+    /// networksetup 每个网络服务要上百毫秒且内部有锁,机器上有七八个服务时
+    /// 同步还原会让退出卡住一秒以上,所以让界面先消失、后台还原完再真正退出。
+    /// 退出按钮和系统退出回调都会走到这里,用标志保证只做一次。
+    func beginTeardown(completion: @escaping @MainActor @Sendable () -> Void) {
+        guard !didTeardown else {
+            completion()
+            return
+        }
+        didTeardown = true
+        stopLocalServices()
+
+        let shouldRestoreProxy = didEnableSystemProxy
+        didEnableSystemProxy = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            if shouldRestoreProxy { SystemProxy.disablePAC() }
+            GitProxy.clear()
+            Task { @MainActor in completion() }
+        }
+    }
+
+    /// 同步拆除,给拿不到异步机会的场景兜底(例如系统强制退出)
     func teardownSync() {
+        guard !didTeardown else { return }
+        didTeardown = true
+        stopLocalServices()
+        if didEnableSystemProxy {
+            SystemProxy.disablePAC()
+            didEnableSystemProxy = false
+        }
+        GitProxy.clear()
+    }
+
+    /// 停掉本机上的隧道、中继与 PAC 服务,都是瞬时操作
+    private func stopLocalServices() {
+        monitor.stopSampling()
+        stopRelay()
         tunnel.stop()
         pacServer?.stop()
         pacServer = nil
-        SystemProxy.disablePAC()
-        GitProxy.clear()
         activeServer = nil
         phase = .disconnected
     }
@@ -212,10 +326,9 @@ final class AppController: ObservableObject {
     private var proxyLine: String {
         guard let server = activeServer else { return "DIRECT" }
         switch server.mode {
-        case .sshTunnel:
+        case .sshTunnel, .remoteSOCKS5:
+            // 两种模式都经本地中继,PAC 统一指向中继端口
             return "SOCKS5 127.0.0.1:\(activeLocalPort); SOCKS 127.0.0.1:\(activeLocalPort)"
-        case .remoteSOCKS5:
-            return "SOCKS5 \(server.host):\(server.remotePort); SOCKS \(server.host):\(server.remotePort)"
         case .remoteHTTP:
             return "PROXY \(server.host):\(server.remotePort)"
         }
@@ -249,10 +362,8 @@ final class AppController: ObservableObject {
     private var gitProxyURL: String {
         guard let server = activeServer else { return "" }
         switch server.mode {
-        case .sshTunnel:
+        case .sshTunnel, .remoteSOCKS5:
             return "socks5h://127.0.0.1:\(activeLocalPort)"
-        case .remoteSOCKS5:
-            return "socks5h://\(server.host):\(server.remotePort)"
         case .remoteHTTP:
             return "http://\(server.host):\(server.remotePort)"
         }

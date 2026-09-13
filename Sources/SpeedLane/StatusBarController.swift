@@ -9,12 +9,13 @@ final class StatusBarController: NSObject {
     private let popover = NSPopover()
     private let controller: AppController
     private let settings: AppSettings
-    private var cancellable: AnyCancellable?
+    private var cancellables: Set<AnyCancellable> = []
 
     init(controller: AppController, settings: AppSettings) {
         self.controller = controller
         self.settings = settings
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        // 图标右边要显示速率数字,宽度随内容变化
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
         let hosting = NSHostingController(
@@ -32,12 +33,32 @@ final class StatusBarController: NSObject {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         updateIcon(enabled: controller.isEnabled)
+        updateRate()
 
-        cancellable = controller.$phase
+        controller.$phase
             .receive(on: RunLoop.main)
             .sink { [weak self] phase in
                 self?.updateIcon(enabled: phase == .connected)
+                self?.updateRate()
             }
+            .store(in: &cancellables)
+
+        // 速率每秒更新一次,驱动图标旁边的数字
+        controller.monitor.$uploadRate
+            .combineLatest(controller.monitor.$downloadRate)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _ in
+                self?.updateRate()
+            }
+            .store(in: &cancellables)
+
+        // 设置里开关切换后立即生效
+        settings.$showTrafficInMenuBar
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateRate()
+            }
+            .store(in: &cancellables)
     }
 
     private func updateIcon(enabled: Bool) {
@@ -45,6 +66,30 @@ final class StatusBarController: NSObject {
         let image = NSImage(systemSymbolName: name, accessibilityDescription: "SpeedLane")
         image?.isTemplate = true
         statusItem.button?.image = image
+    }
+
+    /// 图标右边的实时速率:未连接或该模式拿不到统计时不显示数字
+    private func updateRate() {
+        guard let button = statusItem.button else { return }
+        guard settings.showTrafficInMenuBar, controller.isEnabled, controller.hasTrafficStats else {
+            button.attributedTitle = NSAttributedString(string: "")
+            button.toolTip = nil
+            return
+        }
+        let monitor = controller.monitor
+        let total = monitor.uploadRate + monitor.downloadRate
+        // 定宽格式 + 全等宽字体(空格和 B/K/M/G 也等宽),菜单栏宽度恒定
+        button.attributedTitle = NSAttributedString(
+            string: " " + TrafficMonitor.compactFixed(total),
+            attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: NSColor.labelColor,
+            ]
+        )
+        button.toolTip = """
+        ↓ \(TrafficMonitor.compact(monitor.downloadRate))/s  ↑ \(TrafficMonitor.compact(monitor.uploadRate))/s
+        本次累计 ↓ \(TrafficMonitor.readable(monitor.totalReceived))  ↑ \(TrafficMonitor.readable(monitor.totalSent))
+        """
     }
 
     /// 供截图/调试用(--show-popover 启动参数):直接弹出主面板
@@ -132,8 +177,16 @@ final class StatusBarController: NSObject {
         _ = LaunchAtLogin.set(!LaunchAtLogin.isEnabled)
     }
 
+    /// 退出前先把界面撤掉,让退出看起来是即时的(真正的清理在 AppDelegate 里异步进行)
+    ///
+    /// 这里必须用 removeStatusItem:NSStatusItem.isVisible 会被系统写进偏好并在
+    /// 下次启动时恢复,设成 false 会导致重新打开 App 后菜单栏里根本看不到图标
+    func prepareForQuit() {
+        popover.performClose(nil)
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
     @objc private func quit() {
-        controller.teardownSync()
         NSApp.terminate(nil)
     }
 }

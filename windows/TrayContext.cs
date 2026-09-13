@@ -103,40 +103,68 @@ public class TrayContext : ApplicationContext
             menu.Items.Add(serverMenu);
         }
 
-        // 站点开关
+        // 站点开关:按分组生成二级菜单,组菜单顶部提供"全部开启 / 全部关闭"
         var sitesMenu = new ToolStripMenuItem("加速站点");
-        foreach (var preset in Presets.All)
+        foreach (var group in Presets.Groups)
         {
-            var item = new ToolStripMenuItem($"{preset.Name} ({preset.Domains.Length} 个域名)")
+            var groupMenu = new ToolStripMenuItem(group.Name);
+            var captured = group;
+            var allOn = new ToolStripMenuItem("全部开启");
+            allOn.Click += (_, _) => SetPresets(captured.Presets.Select(p => p.Id), true);
+            var allOff = new ToolStripMenuItem("全部关闭");
+            allOff.Click += (_, _) => SetPresets(captured.Presets.Select(p => p.Id), false);
+            groupMenu.DropDownItems.Add(allOn);
+            groupMenu.DropDownItems.Add(allOff);
+            groupMenu.DropDownItems.Add(new ToolStripSeparator());
+
+            foreach (var preset in group.Presets)
             {
-                Checked = _settings.EnabledPresets.Contains(preset.Id),
-                CheckOnClick = true,
-            };
-            var captured = preset;
-            item.CheckedChanged += (_, _) =>
-            {
-                if (item.Checked) _settings.EnabledPresets.Add(captured.Id);
-                else _settings.EnabledPresets.Remove(captured.Id);
-                _settings.Save();
-                SettingsChanged();
-            };
-            sitesMenu.DropDownItems.Add(item);
+                var item = new ToolStripMenuItem($"{preset.Name} ({preset.Domains.Length} 个域名)")
+                {
+                    Checked = _settings.EnabledPresets.Contains(preset.Id),
+                    CheckOnClick = true,
+                };
+                var capturedPreset = preset;
+                item.CheckedChanged += (_, _) =>
+                {
+                    if (item.Checked) _settings.EnabledPresets.Add(capturedPreset.Id);
+                    else _settings.EnabledPresets.Remove(capturedPreset.Id);
+                    _settings.Save();
+                    SettingsChanged();
+                };
+                groupMenu.DropDownItems.Add(item);
+            }
+            sitesMenu.DropDownItems.Add(groupMenu);
         }
-        foreach (var site in _settings.CustomSites)
+
+        if (_settings.CustomSites.Count > 0)
         {
-            var item = new ToolStripMenuItem($"{site.Domain} (自定义)")
+            var customMenu = new ToolStripMenuItem("自定义站点");
+            var allOn = new ToolStripMenuItem("全部开启");
+            allOn.Click += (_, _) => SetCustomSites(true);
+            var allOff = new ToolStripMenuItem("全部关闭");
+            allOff.Click += (_, _) => SetCustomSites(false);
+            customMenu.DropDownItems.Add(allOn);
+            customMenu.DropDownItems.Add(allOff);
+            customMenu.DropDownItems.Add(new ToolStripSeparator());
+
+            foreach (var site in _settings.CustomSites)
             {
-                Checked = site.Enabled,
-                CheckOnClick = true,
-            };
-            var captured = site;
-            item.CheckedChanged += (_, _) =>
-            {
-                captured.Enabled = item.Checked;
-                _settings.Save();
-                SettingsChanged();
-            };
-            sitesMenu.DropDownItems.Add(item);
+                var item = new ToolStripMenuItem($"{site.Name} ({site.Domains.Count} 个域名)")
+                {
+                    Checked = site.Enabled,
+                    CheckOnClick = true,
+                };
+                var captured = site;
+                item.CheckedChanged += (_, _) =>
+                {
+                    captured.Enabled = item.Checked;
+                    _settings.Save();
+                    SettingsChanged();
+                };
+                customMenu.DropDownItems.Add(item);
+            }
+            sitesMenu.DropDownItems.Add(customMenu);
         }
         menu.Items.Add(sitesMenu);
         menu.Items.Add(new ToolStripSeparator());
@@ -286,6 +314,16 @@ public class TrayContext : ApplicationContext
                 }
                 _activeLocalPort = port.Value;
                 _tunnel.Start(server, _activeLocalPort, password);
+
+                // 确认隧道真的起来了再往下走,确认之前不碰系统代理,
+                // 也避免托盘菜单显示"断开连接"而状态文字还停在"正在连接"
+                var startupError = _tunnel.WaitForStartup();
+                if (startupError != null)
+                {
+                    _tunnel.Stop();
+                    Fail($"连接失败:{startupError}");
+                    return;
+                }
             }
 
             try
@@ -378,6 +416,26 @@ public class TrayContext : ApplicationContext
             {
             }
         });
+    }
+
+    /// <summary>组级批量操作:开启或关闭一组预设</summary>
+    private void SetPresets(IEnumerable<string> ids, bool on)
+    {
+        foreach (var id in ids)
+        {
+            if (on) _settings.EnabledPresets.Add(id);
+            else _settings.EnabledPresets.Remove(id);
+        }
+        _settings.Save();
+        SettingsChanged();
+    }
+
+    /// <summary>组级批量操作:开启或关闭全部自定义域名</summary>
+    private void SetCustomSites(bool on)
+    {
+        foreach (var site in _settings.CustomSites) site.Enabled = on;
+        _settings.Save();
+        SettingsChanged();
     }
 
     /// <summary>服务器信息或默认服务器变化:已启用时重建整个链路</summary>

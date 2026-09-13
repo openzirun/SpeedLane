@@ -22,8 +22,24 @@ public class SettingsForm : Form
     private readonly Label _testResult = new() { AutoSize = true, MaximumSize = new Size(300, 0) };
 
     // 站点页控件
-    private readonly CheckedListBox _sites = new() { Dock = DockStyle.Fill, CheckOnClick = true };
+    // 三层结构:分组节点 → 站点节点 → 域名节点;勾选分组即批量开关组内站点,域名节点不带复选框
+    private readonly TreeView _sites = new()
+    {
+        Dock = DockStyle.Fill,
+        CheckBoxes = true,
+        ShowLines = false,
+        ShowPlusMinus = true,
+        ShowRootLines = false,
+        FullRowSelect = true,
+        HideSelection = false,
+        LabelEdit = true,
+    };
+    private readonly TextBox _newSiteName = new() { PlaceholderText = "站点名称", Width = 110 };
+    private readonly TextBox _newSiteDomains = new() { PlaceholderText = "域名,多个用逗号或空格分隔", Width = 260 };
     private readonly TextBox _newDomain = new() { PlaceholderText = "如 example.com", Width = 200 };
+    private readonly Button _addDomainButton = new() { Text = "添加到选中站点", AutoSize = true };
+    private readonly Button _removeButton = new() { Text = "删除选中项", AutoSize = true };
+    private readonly Button _resetButton = new() { Text = "恢复默认", AutoSize = true };
 
     // 通用页控件
     private readonly CheckBox _launchAtLogin = new() { Text = "开机自动运行", AutoSize = true };
@@ -249,41 +265,93 @@ public class SettingsForm : Form
     private TabPage BuildSitesTab()
     {
         var page = new TabPage("加速站点");
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, Padding = new Padding(8) };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, Padding = new Padding(8) };
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         layout.Controls.Add(_sites, 0, 0);
 
-        var addRow = new FlowLayoutPanel { AutoSize = true };
-        var addButton = new Button { Text = "添加自定义域名", AutoSize = true };
-        var removeButton = new Button { Text = "删除选中的自定义域名", AutoSize = true };
-        addButton.Click += (_, _) => AddCustomDomain();
-        removeButton.Click += (_, _) => RemoveCustomDomain();
-        addRow.Controls.Add(_newDomain);
-        addRow.Controls.Add(addButton);
-        addRow.Controls.Add(removeButton);
-        layout.Controls.Add(addRow, 0, 1);
+        // 第一行:添加自定义站点(名称 + 多域名)
+        var addSiteRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        var addSiteButton = new Button { Text = "添加自定义站点", AutoSize = true };
+        addSiteButton.Click += (_, _) => AddCustomSite();
+        addSiteRow.Controls.Add(new Label { Text = "自定义站点:", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
+        addSiteRow.Controls.Add(_newSiteName);
+        addSiteRow.Controls.Add(_newSiteDomains);
+        addSiteRow.Controls.Add(addSiteButton);
+        layout.Controls.Add(addSiteRow, 0, 1);
+
+        // 第二行:对选中站点/域名的操作
+        var domainRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        _addDomainButton.Click += (_, _) => AddDomainToSelected();
+        _removeButton.Click += (_, _) => RemoveSelected();
+        _resetButton.Click += (_, _) => ResetSelectedPreset();
+        domainRow.Controls.Add(new Label { Text = "域名:", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
+        domainRow.Controls.Add(_newDomain);
+        domainRow.Controls.Add(_addDomainButton);
+        domainRow.Controls.Add(_removeButton);
+        domainRow.Controls.Add(_resetButton);
+        layout.Controls.Add(domainRow, 0, 2);
 
         layout.Controls.Add(new Label
         {
-            Text = "未勾选的站点一律直连;git 命令行加速默认开启,仅对勾选域名的 clone/push 生效",
+            Text = "展开站点可查看域名;预设域名可增删,改过的预设可恢复默认;双击自定义站点名可改名。未勾选的站点一律直连",
             AutoSize = true,
             ForeColor = Color.Gray,
-        }, 0, 2);
+        }, 0, 3);
 
         page.Controls.Add(layout);
 
-        _sites.ItemCheck += (_, e) =>
+        // 分组节点始终展开,站点节点可折叠
+        _sites.BeforeCollapse += (_, e) => e.Cancel = e.Node?.Parent is null;
+        // 控件句柄重建时 WinForms 会重新添加所有节点,状态图标会丢,重新隐藏一次
+        _sites.HandleCreated += (_, _) => BeginInvoke(() =>
         {
-            if (_loading) return;
-            // ItemCheck 在状态改变前触发,延迟到改变后再保存
-            BeginInvoke(() =>
+            foreach (TreeNode groupNode in _sites.Nodes)
+                foreach (TreeNode node in groupNode.Nodes)
+                    foreach (TreeNode domainNode in node.Nodes) HideCheckBox(domainNode);
+        });
+        _sites.AfterSelect += (_, _) => UpdateSiteButtons();
+        _sites.AfterCheck += (_, e) =>
+        {
+            // 程序内部设置 Checked 时 Action 为 Unknown,只响应用户操作,避免递归
+            if (_loading || e.Action == TreeViewAction.Unknown || e.Node is null) return;
+            switch (e.Node.Level)
             {
-                SaveSitesFromList();
-                _tray.SettingsChanged();
-            });
+                case 0:
+                    // 勾选分组:同步组内所有站点
+                    foreach (TreeNode child in e.Node.Nodes) child.Checked = e.Node.Checked;
+                    break;
+                case 1:
+                    // 勾选站点:组节点只在全部开启时显示为勾选
+                    var parent = e.Node.Parent!;
+                    parent.Checked = parent.Nodes.Cast<TreeNode>().All(n => n.Checked);
+                    break;
+                default:
+                    // 域名节点没有复选框,键盘空格触发的勾选直接撤销
+                    e.Node.Checked = false;
+                    return;
+            }
+            SaveSitesFromList();
+            _tray.SettingsChanged();
+        };
+        // 只允许给自定义站点改名;编辑时把节点文字换成纯名称
+        _sites.BeforeLabelEdit += (_, e) =>
+        {
+            if (e.Node?.Tag is CustomSite site) e.Node.Text = site.Name;
+            else e.CancelEdit = true;
+        };
+        _sites.AfterLabelEdit += (_, e) =>
+        {
+            if (e.Node?.Tag is CustomSite site && !string.IsNullOrWhiteSpace(e.Label))
+            {
+                site.Name = e.Label.Trim();
+                _settings.Save();
+            }
+            e.CancelEdit = true;
+            BeginInvoke(ReloadSitesList);
         };
         return page;
     }
@@ -291,49 +359,216 @@ public class SettingsForm : Form
     private void ReloadSitesList()
     {
         _loading = true;
-        _sites.Items.Clear();
-        foreach (var preset in Presets.All)
-            _sites.Items.Add($"{preset.Name}({preset.Domains.Length} 个域名)",
-                _settings.EnabledPresets.Contains(preset.Id));
-        foreach (var site in _settings.CustomSites)
-            _sites.Items.Add($"{site.Domain}(自定义)", site.Enabled);
+        // 记住已展开的站点,重建后恢复
+        var expandedKeys = new HashSet<string>();
+        foreach (TreeNode groupNode in _sites.Nodes)
+            foreach (TreeNode node in groupNode.Nodes)
+                if (node.IsExpanded) expandedKeys.Add(SiteKey(node));
+        var selectedKey = _sites.SelectedNode is { } sel ? SiteKey(sel) : null;
+
+        _sites.BeginUpdate();
+        _sites.Nodes.Clear();
+        foreach (var group in Presets.Groups)
+        {
+            var groupNode = new TreeNode(group.Name) { Tag = group };
+            foreach (var preset in group.Presets)
+            {
+                var domains = _settings.EffectiveDomains(preset);
+                var suffix = _settings.IsPresetModified(preset) ? " · 已修改" : "";
+                var node = new TreeNode($"{preset.Name}({domains.Count} 个域名{suffix})")
+                {
+                    Tag = preset,
+                    Checked = _settings.EnabledPresets.Contains(preset.Id),
+                };
+                foreach (var d in domains) node.Nodes.Add(DomainNode(d));
+                groupNode.Nodes.Add(node);
+            }
+            groupNode.Checked = groupNode.Nodes.Cast<TreeNode>().All(n => n.Checked);
+            _sites.Nodes.Add(groupNode);
+        }
+        if (_settings.CustomSites.Count > 0)
+        {
+            var customNode = new TreeNode("自定义站点");
+            foreach (var site in _settings.CustomSites)
+            {
+                var node = new TreeNode($"{site.Name}({site.Domains.Count} 个域名)") { Tag = site, Checked = site.Enabled };
+                foreach (var d in site.Domains) node.Nodes.Add(DomainNode(d));
+                customNode.Nodes.Add(node);
+            }
+            customNode.Checked = _settings.CustomSites.All(s => s.Enabled);
+            _sites.Nodes.Add(customNode);
+        }
+
+        // 分组展开、站点默认折叠(恢复之前展开的),域名节点去掉复选框
+        foreach (TreeNode groupNode in _sites.Nodes)
+        {
+            groupNode.Expand();
+            foreach (TreeNode node in groupNode.Nodes)
+            {
+                var key = SiteKey(node);
+                if (expandedKeys.Contains(key)) node.Expand();
+                if (key == selectedKey) _sites.SelectedNode = node;
+                foreach (TreeNode domainNode in node.Nodes) HideCheckBox(domainNode);
+            }
+        }
+        _sites.EndUpdate();
         _loading = false;
+        UpdateSiteButtons();
+    }
+
+    private static TreeNode DomainNode(string domain) =>
+        new(domain) { Tag = domain, ForeColor = Color.DimGray };
+
+    private static string SiteKey(TreeNode node) => node.Tag switch
+    {
+        SitePreset p => p.Id,
+        CustomSite c => c.Id.ToString(),
+        string => node.Parent is { } parent ? SiteKey(parent) : "",
+        _ => node.Text,
+    };
+
+    /// <summary>选中的站点节点(选中域名时取其父节点)</summary>
+    private TreeNode? SelectedSiteNode()
+    {
+        var node = _sites.SelectedNode;
+        if (node?.Tag is string) node = node.Parent;
+        return node?.Tag is SitePreset or CustomSite ? node : null;
+    }
+
+    private void UpdateSiteButtons()
+    {
+        var siteNode = SelectedSiteNode();
+        _addDomainButton.Enabled = siteNode != null;
+        _removeButton.Enabled = _sites.SelectedNode?.Tag is string or CustomSite;
+        _removeButton.Text = _sites.SelectedNode?.Tag is CustomSite ? "删除选中站点" : "删除选中域名";
+        _resetButton.Enabled = siteNode?.Tag is SitePreset preset && _settings.IsPresetModified(preset);
     }
 
     private void SaveSitesFromList()
     {
-        for (var i = 0; i < Presets.All.Length; i++)
+        foreach (TreeNode groupNode in _sites.Nodes)
         {
-            var id = Presets.All[i].Id;
-            if (_sites.GetItemChecked(i)) _settings.EnabledPresets.Add(id);
-            else _settings.EnabledPresets.Remove(id);
+            foreach (TreeNode node in groupNode.Nodes)
+            {
+                switch (node.Tag)
+                {
+                    case SitePreset preset:
+                        if (node.Checked) _settings.EnabledPresets.Add(preset.Id);
+                        else _settings.EnabledPresets.Remove(preset.Id);
+                        break;
+                    case CustomSite site:
+                        site.Enabled = node.Checked;
+                        break;
+                }
+            }
         }
-        for (var i = 0; i < _settings.CustomSites.Count; i++)
-            _settings.CustomSites[i].Enabled = _sites.GetItemChecked(Presets.All.Length + i);
         _settings.Save();
     }
 
-    private void AddCustomDomain()
+    private void AddCustomSite()
     {
-        var domain = _newDomain.Text.Trim().ToLowerInvariant()
-            .Replace("https://", "").Replace("http://", "").Split('/')[0];
+        var domains = DomainParser.ParseList(_newSiteDomains.Text);
+        if (domains.Count == 0) return;
+        var name = _newSiteName.Text.Trim();
+        _settings.CustomSites.Add(new CustomSite
+        {
+            Name = name.Length > 0 ? name : domains[0],
+            Domains = domains,
+        });
+        _settings.Save();
+        _newSiteName.Text = "";
+        _newSiteDomains.Text = "";
+        ReloadSitesList();
+        _tray.SettingsChanged();
+    }
+
+    private void AddDomainToSelected()
+    {
+        var domain = DomainParser.Clean(_newDomain.Text);
         if (domain.Length == 0 || !domain.Contains('.')) return;
-        if (_settings.CustomSites.Any(s => s.Domain == domain)) return;
-        _settings.CustomSites.Add(new CustomSite { Domain = domain });
+        switch (SelectedSiteNode()?.Tag)
+        {
+            case SitePreset preset:
+                _settings.AddDomain(preset, domain);
+                break;
+            case CustomSite site:
+                if (!site.Domains.Contains(domain)) site.Domains.Add(domain);
+                break;
+            default:
+                return;
+        }
         _settings.Save();
         _newDomain.Text = "";
         ReloadSitesList();
         _tray.SettingsChanged();
     }
 
-    private void RemoveCustomDomain()
+    private void RemoveSelected()
     {
-        var index = _sites.SelectedIndex - Presets.All.Length;
-        if (index < 0 || index >= _settings.CustomSites.Count) return;
-        _settings.CustomSites.RemoveAt(index);
+        var node = _sites.SelectedNode;
+        switch (node?.Tag)
+        {
+            case CustomSite site:
+                _settings.CustomSites.Remove(site);
+                break;
+            case string domain when node.Parent?.Tag is SitePreset preset:
+                _settings.RemoveDomain(preset, domain);
+                break;
+            case string domain when node.Parent?.Tag is CustomSite site:
+                site.Domains.Remove(domain);
+                break;
+            default:
+                return;
+        }
         _settings.Save();
         ReloadSitesList();
         _tray.SettingsChanged();
+    }
+
+    private void ResetSelectedPreset()
+    {
+        if (SelectedSiteNode()?.Tag is not SitePreset preset) return;
+        _settings.ResetPreset(preset);
+        _settings.Save();
+        ReloadSitesList();
+        _tray.SettingsChanged();
+    }
+
+    // MARK: 隐藏单个节点的复选框(TreeView 没有公开 API,通过 TVM_SETITEM 清空状态图标)
+
+    private const int TvFirst = 0x1100;
+    private const int TvmSetItem = TvFirst + 63;
+    private const int TvifState = 0x0008;
+    private const int TvisStateImageMask = 0xF000;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct TvItem
+    {
+        public int Mask;
+        public IntPtr Item;
+        public int State;
+        public int StateMask;
+        public IntPtr Text;
+        public int TextMax;
+        public int Image;
+        public int SelectedImage;
+        public int Children;
+        public IntPtr Param;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref TvItem lParam);
+
+    private void HideCheckBox(TreeNode node)
+    {
+        var item = new TvItem
+        {
+            Item = node.Handle,
+            Mask = TvifState,
+            StateMask = TvisStateImageMask,
+            State = 0,
+        };
+        SendMessage(_sites.Handle, TvmSetItem, IntPtr.Zero, ref item);
     }
 
     // MARK: 通用标签页

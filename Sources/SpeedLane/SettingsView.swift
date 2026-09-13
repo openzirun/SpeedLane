@@ -7,6 +7,8 @@ struct SettingsView: View {
                 .tabItem { Label("服务器", systemImage: "server.rack") }
             SitesSettingsTab()
                 .tabItem { Label("加速站点", systemImage: "globe") }
+            TrafficLogTab()
+                .tabItem { Label("日志", systemImage: "list.bullet.rectangle") }
             GeneralSettingsTab()
                 .tabItem { Label("通用", systemImage: "gearshape") }
             AboutSettingsTab()
@@ -289,6 +291,15 @@ struct GeneralSettingsTab: View {
                     isOn: Binding(
                         get: { settings.autoConnect },
                         set: { settings.autoConnect = $0 }
+                    )
+                )
+
+                settingRow(
+                    title: "菜单栏显示实时流量",
+                    subtitle: "在图标旁显示当前速率,如 98K;关掉后只剩图标,日志和统计不受影响",
+                    isOn: Binding(
+                        get: { settings.showTrafficInMenuBar },
+                        set: { settings.showTrafficInMenuBar = $0 }
                     )
                 )
 

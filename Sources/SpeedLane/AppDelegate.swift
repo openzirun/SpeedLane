@@ -4,6 +4,8 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: AppController?
     private var statusBar: StatusBarController?
+    /// 只能回复系统一次,后台清理与超时兜底谁先到都算
+    private var didReplyToTerminate = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -96,10 +98,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        // 退出时务必还原系统代理,避免断网
-        if let controller, controller.isEnabled || controller.isBusy {
-            controller.teardownSync()
+    /// 统一的退出入口:不管从退出按钮、菜单还是 Cmd+Q 触发都走这里
+    ///
+    /// 菜单栏图标先消失让退出看起来是即时的,还原系统代理放后台,
+    /// 完成后再回复系统可以结束进程;万一后台卡住,兜底 3 秒后照常退出
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let controller else { return .terminateNow }
+        statusBar?.prepareForQuit()
+
+        controller.beginTeardown { [weak self] in
+            self?.replyToTerminate()
         }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            self?.replyToTerminate()
+        }
+        return .terminateLater
+    }
+
+    private func replyToTerminate() {
+        guard !didReplyToTerminate else { return }
+        didReplyToTerminate = true
+        NSApp.reply(toApplicationShouldTerminate: true)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // 正常路径上 beginTeardown 已经做完了,这里只为异常退出兜底
+        controller?.teardownSync()
     }
 }
